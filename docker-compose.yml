@@ -1,0 +1,90 @@
+# Production-style stack for ITAMS (Laravel 11).
+# Build & run:  docker compose up -d --build
+# The app image is built once (target: app) and reused by the queue + scheduler.
+
+services:
+  app:
+    build:
+      context: .
+      target: app
+    image: itams-app:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RUN_MIGRATIONS: "true"   # only this container runs migrations on boot
+    volumes:
+      - storage:/var/www/html/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: web
+    image: itams-web:latest
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-80}:80"
+    volumes:
+      - storage:/var/www/html/storage:ro   # serve user uploads via public/storage symlink
+    depends_on:
+      app:
+        condition: service_healthy
+
+  queue:
+    image: itams-app:latest
+    restart: unless-stopped
+    env_file: .env
+    command: php artisan queue:work --tries=3 --sleep=3 --max-time=3600
+    volumes:
+      - storage:/var/www/html/storage
+    # Override the app image's php-fpm healthcheck: this container runs a worker,
+    # not php-fpm, so check the worker process is alive instead.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'queue:work' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      app:
+        condition: service_healthy
+
+  scheduler:
+    image: itams-app:latest
+    restart: unless-stopped
+    env_file: .env
+    command: php artisan schedule:work
+    volumes:
+      - storage:/var/www/html/storage
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'schedule:work' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      app:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  mysql-data:
+  storage:
